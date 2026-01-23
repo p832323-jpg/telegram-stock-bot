@@ -1,116 +1,68 @@
 import os
 import pandas as pd
 import yfinance as yf
-
 from telegram import Update
-from telegram.ext import (
-    Updater,
-    CommandHandler,
-    MessageHandler,
-    Filters,
-    CallbackContext
-)
+from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters
 
-# ✅ TOKEN FROM RAILWAY VARIABLE
-TOKEN = os.getenv("TELEGRAM_TOKEN")
-
-# ---------- RSI ----------
-def calculate_rsi(series, period=14):
-    delta = series.diff()
-    gain = delta.where(delta > 0, 0.0)
-    loss = -delta.where(delta < 0, 0.0)
-
-    avg_gain = gain.rolling(period).mean()
-    avg_loss = loss.rolling(period).mean()
-
-    rs = avg_gain / avg_loss
-    rsi = 100 - (100 / (1 + rs))
-    return rsi
-
-# ---------- STOCK ANALYSIS ----------
-def analyze_stock(symbol):
-    try:
-        stock = yf.Ticker(symbol)
-        df = stock.history(period="3mo")
-
-        if df.empty or len(df) < 20:
-            return f"❌ {symbol}\nNot enough data"
-
-        close = df["Close"]
-        price = round(close.iloc[-1], 2)
-        rsi = round(calculate_rsi(close).iloc[-1], 2)
-
-        ema10 = close.ewm(span=10).mean().iloc[-1]
-        ema50 = close.ewm(span=50).mean().iloc[-1]
-
-        trend = "📈 Uptrend" if ema10 > ema50 else "📉 Downtrend"
-
-        if rsi < 30:
-            action = "✅ BUY"
-            hold = "1–3 Months"
-        elif rsi > 70:
-            action = "❌ SELL IMMEDIATELY"
-            hold = "EXIT"
-        else:
-            action = "⏸ HOLD"
-            hold = "WAIT"
-
-        return f"""
-📊 {symbol}
-
-💰 Price: {price}
-📉 RSI: {rsi}
-📊 Trend: {trend}
-
-👉 Action: {action}
-⏳ Hold: {hold}
-"""
-    except Exception as e:
-        return f"❌ Error analyzing {symbol}"
+# ✅ TOKEN from Railway variable
+TOKEN = os.getenv("BOT_TOKEN")
 
 # ---------- START ----------
-def start(update: Update, context: CallbackContext):
-    update.message.reply_text(
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
         "👋 Welcome to Stock AI Bot\n\n"
-        "📂 Send a CSV file\n"
-        "🧾 Column name must be: Symbol\n"
+        "📂 Send a CSV file with column: Symbol\n"
         "📌 Example:\nTCS.NS\nINFY.NS\nRELIANCE.NS"
     )
 
 # ---------- CSV HANDLER ----------
-def handle_csv(update: Update, context: CallbackContext):
+async def handle_csv(update: Update, context: ContextTypes.DEFAULT_TYPE):
     file = update.message.document
-
     if not file.file_name.endswith(".csv"):
-        update.message.reply_text("❌ Please upload a CSV file")
+        await update.message.reply_text("❌ Please upload a CSV file")
         return
 
-    csv_file = file.get_file()
+    csv_file = await file.get_file()
     path = "stocks.csv"
-    csv_file.download(path)
+    await csv_file.download_to_drive(path)
 
     df = pd.read_csv(path)
 
     if "Symbol" not in df.columns:
-        update.message.reply_text("❌ CSV must have 'Symbol' column")
+        await update.message.reply_text("❌ CSV must have 'Symbol' column")
         return
 
-    update.message.reply_text("🔍 Analyzing stocks...")
+    await update.message.reply_text("🔍 Analyzing stocks...")
 
     for symbol in df["Symbol"]:
-        result = analyze_stock(str(symbol).strip())
-        update.message.reply_text(result)
+        symbol = str(symbol).strip()
+        try:
+            stock = yf.Ticker(symbol)
+            hist = stock.history(period="1mo")
+            if hist.empty:
+                await update.message.reply_text(f"❌ No data for {symbol}")
+                continue
+
+            price = round(hist['Close'].iloc[-1],2)
+            rsi = 50  # Placeholder, future improvement
+            trend = "📈 Trend unknown"  # Placeholder
+            action = "⏸ HOLD"  # Placeholder
+
+            await update.message.reply_text(
+                f"📊 {symbol}\n💰 Price: {price}\n📊 Trend: {trend}\n👉 Action: {action}"
+            )
+        except Exception as e:
+            await update.message.reply_text(f"❌ Error analyzing {symbol}")
 
 # ---------- MAIN ----------
 def main():
-    updater = Updater(TOKEN, use_context=True)
-    dp = updater.dispatcher
+    app = Application.builder().token(TOKEN).build()
 
-    dp.add_handler(CommandHandler("start", start))
-    dp.add_handler(MessageHandler(Filters.document.mime_type("text/csv"), handle_csv))
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(MessageHandler(filters.Document.FileExtension("csv"), handle_csv))
 
-    updater.start_polling()
-    updater.idle()
+    print("Bot started...")
+    app.run_polling()
 
 if __name__ == "__main__":
     main()
