@@ -1,4 +1,5 @@
 import os
+import re
 import pandas as pd
 import yfinance as yf
 from telegram import Update
@@ -11,42 +12,43 @@ from telegram.ext import (
 )
 
 TOKEN = os.getenv("BOT_TOKEN")
+UPDATE_INTERVAL = 30 * 60  # 30 mins
 
-UPDATE_INTERVAL = 30 * 60  # 30 minutes
+user_stocks = {}
 
-POSSIBLE_COLUMNS = [
-    "SYMBOL", "Symbol", "Stock", "Stock Name", "Security",
-    "Company", "Instrument", "Name"
-]
-
-user_stocks = {}  # chat_id -> list of symbols
-
-
-# ---------- BASIC COMMAND ----------
+# -------- START ----------
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "👋 Hi Bro!\n\n"
-        "📂 Groww Excel / CSV file upload pannunga\n"
-        "❌ Manual edit thevai illa\n"
-        "⏱ Market open to close – every 30 mins\n"
-        "🤖 SELL / HOLD auto analyse pannuven"
+        "📂 Groww Excel / CSV upload pannunga\n"
+        "❌ Manual edit vendam\n"
+        "⏱ Every 30 mins SELL / HOLD update varum"
     )
 
+# -------- HELPERS ----------
+def is_valid_stock(name: str) -> bool:
+    name = name.upper().strip()
 
-# ---------- HELPERS ----------
-def detect_stock_column(df: pd.DataFrame):
-    for col in df.columns:
-        if str(col).strip().upper() in [c.upper() for c in POSSIBLE_COLUMNS]:
-            return col
-    return None
+    # remove unwanted words
+    blacklist = [
+        "TOTAL", "SUMMARY", "VALUE", "P&L", "CHARGES",
+        "BROKERAGE", "GST", "STT", "DUTY",
+        "UNREALISED", "REALISED", "STATEMENT",
+        "FROM", "TO", "AS ON", "CLIENT"
+    ]
+
+    if any(word in name for word in blacklist):
+        return False
+
+    # only alphabets & length check
+    if not re.fullmatch(r"[A-Z]{3,20}", name):
+        return False
+
+    return True
 
 
 def clean_symbol(name: str):
-    name = str(name).upper()
-    for x in [" LTD", " LIMITED", " PVT", " PVT LTD"]:
-        name = name.replace(x, "")
-    name = name.replace(" ", "")
-    return name + ".NS"
+    return name.upper().strip() + ".NS"
 
 
 def analyse_stock(symbol: str):
@@ -56,10 +58,7 @@ def analyse_stock(symbol: str):
             return "❓ NO DATA"
 
         close = data["Close"]
-        last = close.iloc[-1]
-        avg = close.mean()
-
-        if last > avg:
+        if close.iloc[-1] > close.mean():
             return "🟢 HOLD"
         else:
             return "🔴 SELL / WATCH"
@@ -67,61 +66,55 @@ def analyse_stock(symbol: str):
         return "⚠️ ERROR"
 
 
-# ---------- FILE HANDLER ----------
+# -------- FILE HANDLER ----------
 async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
 
     file = await update.message.document.get_file()
-    filename = update.message.document.file_name.lower()
-    path = f"/tmp/{filename}"
+    name = update.message.document.file_name.lower()
+    path = f"/tmp/{name}"
     await file.download_to_drive(path)
 
     try:
-        if filename.endswith(".csv"):
+        if name.endswith(".csv"):
             df = pd.read_csv(path)
         else:
             df = pd.read_excel(path)
-    except Exception:
+    except:
         await update.message.reply_text("❌ File read panna mudiyala.")
         return
 
-    stock_col = detect_stock_column(df)
-    if not stock_col:
-        await update.message.reply_text(
-            f"❌ Stock column kandupidikka mudiyala.\n\nFound columns:\n{list(df.columns)}"
-        )
+    found = set()
+
+    for col in df.columns:
+        for val in df[col].dropna().astype(str):
+            val = val.upper().strip()
+            if is_valid_stock(val):
+                found.add(clean_symbol(val))
+
+    if not found:
+        await update.message.reply_text("❌ Valid stock names kandupidikka mudiyala.")
         return
 
-    symbols = [
-        clean_symbol(x)
-        for x in df[stock_col].dropna().unique().tolist()
-    ]
-
-    if not symbols:
-        await update.message.reply_text("❌ Stock symbols empty.")
-        return
-
-    user_stocks[chat_id] = symbols
+    user_stocks[chat_id] = list(found)
 
     await update.message.reply_text(
-        f"✅ {len(symbols)} stocks detected.\n"
-        "⏱ Every 30 mins update start aagiduchu 🔥"
+        f"✅ {len(found)} REAL stocks detected\n"
+        "🔥 Every 30 mins update start aagiduchu"
     )
 
     await send_analysis(chat_id, context)
 
 
-# ---------- SEND ANALYSIS ----------
-async def send_analysis(chat_id, context: ContextTypes.DEFAULT_TYPE):
-    symbols = user_stocks.get(chat_id)
-    if not symbols:
+# -------- ANALYSIS ----------
+async def send_analysis(chat_id, context):
+    stocks = user_stocks.get(chat_id)
+    if not stocks:
         return
 
     msg = "📊 *Portfolio Update*\n\n"
-
-    for sym in symbols:
-        result = analyse_stock(sym)
-        msg += f"{sym} : {result}\n"
+    for s in stocks:
+        msg += f"{s} : {analyse_stock(s)}\n"
 
     await context.bot.send_message(
         chat_id=chat_id,
@@ -130,13 +123,13 @@ async def send_analysis(chat_id, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
-# ---------- SCHEDULER ----------
-async def market_scheduler(context: ContextTypes.DEFAULT_TYPE):
-    for chat_id in user_stocks.keys():
-        await send_analysis(chat_id, context)
+# -------- SCHEDULER ----------
+async def scheduler(context):
+    for cid in user_stocks:
+        await send_analysis(cid, context)
 
 
-# ---------- MAIN ----------
+# -------- MAIN ----------
 def main():
     app = Application.builder().token(TOKEN).build()
 
@@ -145,7 +138,7 @@ def main():
 
     if app.job_queue:
         app.job_queue.run_repeating(
-            market_scheduler,
+            scheduler,
             interval=UPDATE_INTERVAL,
             first=UPDATE_INTERVAL
         )
