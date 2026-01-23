@@ -6,28 +6,26 @@ import datetime as dt
 
 from telegram import Update
 from telegram.ext import (
-    ApplicationBuilder,
+    Application,
     CommandHandler,
     MessageHandler,
     ContextTypes,
     filters,
 )
 
-# ================= CONFIG =================
 TOKEN = os.getenv("BOT_TOKEN")
-UPDATE_INTERVAL = 1800  # 30 minutes
+UPDATE_INTERVAL = 1800  # 30 mins
 
 POSSIBLE_COLUMNS = [
-    "SYMBOL", "Symbol", "Instrument", "Security",
-    "Stock", "Company", "Name"
+    "SYMBOL", "Symbol", "Instrument",
+    "Security", "Stock", "Company", "Name"
 ]
 
 STOCKS = []
 CHAT_ID = None
-# =========================================
 
 
-# ---------- BASIC HELPERS ----------
+# ---------------- HELPERS ----------------
 
 def market_open():
     now = dt.datetime.now().time()
@@ -42,7 +40,6 @@ def clean_symbol(name):
 
 
 def detect_table(df):
-    # find header row automatically (Groww / any messy excel)
     for i in range(len(df)):
         row = df.iloc[i].astype(str).str.upper().tolist()
         for col in POSSIBLE_COLUMNS:
@@ -53,22 +50,10 @@ def detect_table(df):
 
 
 def extract_symbols(df):
-    stock_col = None
     for c in df.columns:
         if str(c).upper() in [x.upper() for x in POSSIBLE_COLUMNS]:
-            stock_col = c
-            break
-
-    if stock_col is None:
-        return []
-
-    symbols = []
-    for val in df[stock_col].dropna():
-        s = str(val).strip()
-        if len(s) > 1:
-            symbols.append(clean_symbol(s))
-
-    return list(set(symbols))
+            return list(set(clean_symbol(x) for x in df[c].dropna()))
+    return []
 
 
 def analyse(symbol):
@@ -81,15 +66,12 @@ def analyse(symbol):
         price = close.iloc[-1]
         sma = close.rolling(10).mean().iloc[-1]
 
-        if price < sma:
-            return "SELL 🔴"
-        else:
-            return "HOLD 🟢"
+        return "SELL 🔴" if price < sma else "HOLD 🟢"
     except:
         return "ERROR"
 
 
-# ---------- TELEGRAM ----------
+# ---------------- TELEGRAM ----------------
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global CHAT_ID
@@ -97,9 +79,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await update.message.reply_text(
         "👋 Hi bro!\n\n"
-        "📂 ANY CSV / Excel upload pannunga\n"
-        "⏱ Market open → every 30 mins update\n"
-        "📊 ALL stocks SELL / HOLD"
+        "📂 CSV / Excel upload pannunga\n"
+        "⏱ Market open → 30 mins update\n"
+        "📊 SELL / HOLD analysis"
     )
 
 
@@ -107,31 +89,28 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global STOCKS, CHAT_ID
     CHAT_ID = update.effective_chat.id
 
-    file = await update.message.document.get_file()
-    path = update.message.document.file_name
+    doc = update.message.document
+    file = await doc.get_file()
+    path = doc.file_name
     await file.download_to_drive(path)
 
     try:
-        if path.endswith(".csv"):
-            raw = pd.read_csv(path, header=None)
-        else:
-            raw = pd.read_excel(path, header=None)
-
+        raw = pd.read_csv(path, header=None) if path.endswith(".csv") else pd.read_excel(path, header=None)
         df = detect_table(raw)
+
         if df is None:
             await update.message.reply_text("❌ Stock table kandupidikka mudiyala.")
             return
 
-        symbols = extract_symbols(df)
-        if not symbols:
-            await update.message.reply_text("❌ Stock names kandupidikka mudiyala.")
+        STOCKS = extract_symbols(df)
+
+        if not STOCKS:
+            await update.message.reply_text("❌ Stock names illa.")
             return
 
-        STOCKS = symbols
-
         await update.message.reply_text(
-            f"✅ {len(STOCKS)} stocks loaded.\n"
-            "⏱ Market open irundha every 30 mins update varum."
+            f"✅ {len(STOCKS)} stocks loaded\n"
+            "⏱ Market open → auto update start"
         )
 
     except Exception as e:
@@ -142,45 +121,41 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
             os.remove(path)
 
 
-# ---------- 30 MIN SCHEDULER ----------
+# ---------------- SCHEDULER ----------------
 
-async def scheduler(app):
-    while True:
-        await asyncio.sleep(UPDATE_INTERVAL)
+async def market_scheduler(context: ContextTypes.DEFAULT_TYPE):
+    if not CHAT_ID or not STOCKS or not market_open():
+        return
 
-        if not CHAT_ID or not STOCKS:
-            continue
+    msg = "⏰ *30 Min Market Update*\n\n"
+    for s in STOCKS:
+        msg += f"{s} → {analyse(s)}\n"
 
-        if not market_open():
-            continue
-
-        msg = "⏰ *30 Min Market Update*\n\n"
-        for s in STOCKS:
-            msg += f"{s} → {analyse(s)}\n"
-
-        await app.bot.send_message(
-            chat_id=CHAT_ID,
-            text=msg,
-            parse_mode="Markdown"
-        )
+    await context.bot.send_message(
+        chat_id=CHAT_ID,
+        text=msg,
+        parse_mode="Markdown"
+    )
 
 
-# ---------- MAIN ----------
+# ---------------- MAIN ----------------
 
-async def main():
-    if not TOKEN:
-        raise ValueError("BOT_TOKEN env variable set pannala")
-
-    app = ApplicationBuilder().token(TOKEN).build()
+def main():
+    app = Application.builder().token(TOKEN).build()
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(MessageHandler(filters.Document.ALL, handle_file))
 
-    asyncio.create_task(scheduler(app))
+    # 🔥 CORRECT WAY (NO asyncio crash)
+    app.job_queue.run_repeating(
+        market_scheduler,
+        interval=UPDATE_INTERVAL,
+        first=UPDATE_INTERVAL
+    )
 
     print("🤖 Bot running...")
-    await app.run_polling()
+    app.run_polling()
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    main()
