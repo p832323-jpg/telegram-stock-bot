@@ -4,7 +4,7 @@ from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, ContextTypes, filters
 import yfinance as yf
 
-TOKEN = os.getenv("TELEGRAM_TOKEN")
+TOKEN = os.getenv("BOT_TOKEN")
 
 POSSIBLE_COLUMNS = ["SYMBOL", "Symbol", "Instrument", "Security", "Stock", "Company"]
 
