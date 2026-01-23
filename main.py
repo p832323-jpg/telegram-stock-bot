@@ -4,61 +4,65 @@ from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, ContextTypes, filters
 import yfinance as yf
 
-TOKEN = os.getenv("BOT_TOKEN")
+TOKEN = os.getenv("TELEGRAM_TOKEN")
 
-POSSIBLE_COLUMNS = [
-    "Stock Name",
-    "Instrument",
-    "Company",
-    "Security Name",
-    "Stock",
-    "Symbol"
-]
+POSSIBLE_COLUMNS = ["SYMBOL", "Symbol", "Instrument", "Security", "Stock", "Company"]
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "👋 Hi!\n\n"
         "📂 Groww Holdings Excel (.xlsx) file upload pannunga\n"
         "❌ Manual edit thevai illa\n"
-        "🤖 Naan auto analyse panni SELL / HOLD solluven"
+        "🤖 Auto analyse panni SELL / HOLD solluven"
     )
 
-def clean_symbol(name: str):
+def detect_table(df):
+    for i in range(len(df)):
+        row = df.iloc[i].astype(str).str.upper().tolist()
+        for col in POSSIBLE_COLUMNS:
+            if col in row:
+                df.columns = df.iloc[i]
+                return df[i+1:]
+    return None
+
+def clean_symbol(name):
     name = str(name).upper()
-    remove_words = [" LTD.", " LIMITED", " LTD", " LIMITED."]
-    for w in remove_words:
-        name = name.replace(w, "")
+    name = name.replace(" LTD", "").replace(" LIMITED", "")
     name = name.replace(" ", "")
     return name + ".NS"
 
 async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
     file = await update.message.document.get_file()
-    file_path = "groww.xlsx"
-    await file.download_to_drive(file_path)
+    path = "groww.xlsx"
+    await file.download_to_drive(path)
 
     try:
-        df = pd.read_excel(file_path)
+        raw = pd.read_excel(path, header=None)
     except Exception:
-        await update.message.reply_text("❌ Excel file read panna mudiyala.")
+        await update.message.reply_text("❌ Excel read panna mudiyala.")
         return
 
-    stock_column = None
-    for col in POSSIBLE_COLUMNS:
-        if col in df.columns:
-            stock_column = col
+    df = detect_table(raw)
+
+    if df is None:
+        await update.message.reply_text("❌ Stock table kandupidikka mudiyala.")
+        return
+
+    stock_col = None
+    for c in df.columns:
+        if str(c).upper() in [x.upper() for x in POSSIBLE_COLUMNS]:
+            stock_col = c
             break
 
-    if stock_column is None:
+    if stock_col is None:
         await update.message.reply_text(
-            "❌ Stock column kandupidikka mudiyala.\n"
-            f"Found columns:\n{list(df.columns)}"
+            f"❌ Stock column illa.\nFound columns:\n{list(df.columns)}"
         )
         return
 
-    stocks = df[stock_column].dropna().tolist()
-    symbols = [clean_symbol(s) for s in stocks]
+    symbols = [clean_symbol(x) for x in df[stock_col].dropna().tolist()]
 
-    reply = "📊 *Groww Holdings – Analysis*\n\n"
+    reply = "📊 *Groww Portfolio Analysis*\n\n"
 
     for sym in symbols:
         try:
