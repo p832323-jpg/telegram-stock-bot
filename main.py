@@ -1,67 +1,67 @@
 import os
 import pandas as pd
-import yfinance as yf
 from telegram import Update
-from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters
+from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, ContextTypes, filters
+import yfinance as yf
 
-# ✅ TOKEN from Railway variable
 TOKEN = os.getenv("BOT_TOKEN")
 
-# ---------- START ----------
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "👋 Welcome to Stock AI Bot\n\n"
-        "📂 Send a CSV file with column: Symbol\n"
-        "📌 Example:\nTCS.NS\nINFY.NS\nRELIANCE.NS"
+        "👋 Hi!\n\n"
+        "📂 Groww Holdings Excel (.xlsx) file upload pannunga.\n"
+        "❌ Manual edit thevai illa.\n"
+        "🤖 Naan auto analyse panni SELL / HOLD solluven."
     )
 
-# ---------- CSV HANDLER ----------
-async def handle_csv(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    file = update.message.document
-    if not file.file_name.endswith(".csv"):
-        await update.message.reply_text("❌ Please upload a CSV file")
+def clean_symbol(name: str):
+    name = name.upper()
+    remove_words = [" LTD.", " LIMITED", " LTD", " LIMITED."]
+    for w in remove_words:
+        name = name.replace(w, "")
+    name = name.replace(" ", "")
+    return name + ".NS"
+
+async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    file = await update.message.document.get_file()
+    file_path = "groww.xlsx"
+    await file.download_to_drive(file_path)
+
+    try:
+        df = pd.read_excel(file_path)
+    except Exception:
+        await update.message.reply_text("❌ File read panna mudiyala. Correct Groww Excel upload pannunga.")
         return
 
-    csv_file = await file.get_file()
-    path = "stocks.csv"
-    await csv_file.download_to_drive(path)
-
-    df = pd.read_csv(path)
-
-    if "Symbol" not in df.columns:
-        await update.message.reply_text("❌ CSV must have 'Symbol' column")
+    if "Stock Name" not in df.columns:
+        await update.message.reply_text("❌ 'Stock Name' column kandupidikka mudiyala.")
         return
 
-    await update.message.reply_text("🔍 Analyzing stocks...")
+    stocks = df["Stock Name"].dropna().tolist()
+    symbols = [clean_symbol(s) for s in stocks]
 
-    for symbol in df["Symbol"]:
-        symbol = str(symbol).strip()
+    reply = "📊 *Analysis Result*\n\n"
+    for sym in symbols:
         try:
-            stock = yf.Ticker(symbol)
-            hist = stock.history(period="1mo")
-            if hist.empty:
-                await update.message.reply_text(f"❌ No data for {symbol}")
+            data = yf.Ticker(sym).history(period="5d")
+            if data.empty:
+                reply += f"{sym} : ❓ Data illa\n"
                 continue
 
-            price = round(hist['Close'].iloc[-1],2)
-            rsi = 50  # Placeholder, future improvement
-            trend = "📈 Trend unknown"  # Placeholder
-            action = "⏸ HOLD"  # Placeholder
+            close = data["Close"]
+            if close.iloc[-1] > close.mean():
+                reply += f"{sym} : 🟢 HOLD\n"
+            else:
+                reply += f"{sym} : 🔴 SELL / WATCH\n"
+        except:
+            reply += f"{sym} : ⚠️ Error\n"
 
-            await update.message.reply_text(
-                f"📊 {symbol}\n💰 Price: {price}\n📊 Trend: {trend}\n👉 Action: {action}"
-            )
-        except Exception as e:
-            await update.message.reply_text(f"❌ Error analyzing {symbol}")
+    await update.message.reply_text(reply, parse_mode="Markdown")
 
-# ---------- MAIN ----------
 def main():
-    app = Application.builder().token(TOKEN).build()
-
+    app = ApplicationBuilder().token(TOKEN).build()
     app.add_handler(CommandHandler("start", start))
-    app.add_handler(MessageHandler(filters.Document.FileExtension("csv"), handle_csv))
-
-    print("Bot started...")
+    app.add_handler(MessageHandler(filters.Document.ALL, handle_file))
     app.run_polling()
 
 if __name__ == "__main__":
