@@ -4,15 +4,15 @@ import pandas as pd
 import yfinance as yf
 from telegram import Update
 from telegram.ext import (
-    Application,
+    ApplicationBuilder,
     CommandHandler,
     MessageHandler,
     ContextTypes,
     filters,
 )
+from telegram.ext import JobQueue
 
 TOKEN = os.getenv("BOT_TOKEN")
-UPDATE_INTERVAL = 30 * 60  # 30 minutes
 
 user_stocks = {}
 
@@ -22,127 +22,127 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "👋 Hi Bro!\n\n"
         "📂 Groww Excel / CSV upload pannunga\n"
         "❌ Manual edit vendam\n"
-        "⏱ Every 30 mins SELL / HOLD update varum"
+        "⏱️ Every 30 mins SELL / HOLD update varum"
     )
 
-# ---------------- HELPERS ----------------
-def clean_symbol(name: str):
-    return name.upper().strip().replace(" ", "") + ".NS"
-
-
-def is_real_stock(name: str) -> bool:
+# ---------------- CLEAN STOCK ----------------
+def clean_stock(name: str):
     name = name.upper().strip()
 
-    # must be single word alphabets
     if not re.fullmatch(r"[A-Z]{3,20}", name):
-        return False
+        return None
 
-    # blacklist
     blacklist = [
-        "ISIN", "QUANTITY", "TOTAL", "SUMMARY", "VALUE",
-        "P&L", "CHARGES", "BROKERAGE", "GST", "STT",
-        "REALISED", "UNREALISED", "STATEMENT"
+        "ISIN","QUANTITY","SUMMARY","TOTAL","VALUE","CHARGES",
+        "BROKERAGE","GST","STT","REALISED","UNREALISED",
+        "STATEMENT","HOLDINGS","PNL","REPORT"
     ]
 
     if name in blacklist:
-        return False
+        return None
 
-    return True
+    return name + ".NS"
 
-
-def analyse_stock(symbol: str):
+# ---------------- READ FILE ----------------
+def read_file(path, fname):
     try:
-        data = yf.Ticker(symbol).history(period="5d", interval="30m")
-        if data.empty:
-            return "❓ NO DATA"
-
-        close = data["Close"]
-        return "🟢 HOLD" if close.iloc[-1] > close.mean() else "🔴 SELL / WATCH"
+        if fname.endswith(".csv"):
+            return pd.read_csv(path)
+        return pd.read_excel(path)
     except:
-        return "⚠️ ERROR"
+        return None
 
+# ---------------- DETECT STOCK COLUMN ----------------
+def detect_stock_column(df):
+    keywords = ["stock", "company", "security", "instrument", "symbol", "scrip", "name"]
+    for col in df.columns:
+        c = str(col).lower()
+        if any(k in c for k in keywords):
+            return col
+    return None
+
+# ---------------- ANALYSIS ----------------
+async def analyse_and_send(chat_id, context):
+    stocks = user_stocks.get(chat_id, [])
+    if not stocks:
+        return
+
+    msg = "📊 *Portfolio Update*\n\n"
+
+    for s in stocks:
+        try:
+            data = yf.Ticker(s).history(period="5d")
+            if data.empty:
+                msg += f"{s} : ❓ NO DATA\n"
+                continue
+
+            close = data["Close"]
+            if close.iloc[-1] >= close.mean():
+                msg += f"{s} : 🟢 HOLD\n"
+            else:
+                msg += f"{s} : 🔴 SELL / WATCH\n"
+        except:
+            msg += f"{s} : ⚠️ ERROR\n"
+
+    await context.bot.send_message(chat_id=chat_id, text=msg, parse_mode="Markdown")
 
 # ---------------- FILE HANDLER ----------------
 async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
-    file = await update.message.document.get_file()
-    fname = update.message.document.file_name.lower()
+    doc = update.message.document
+    file = await doc.get_file()
+
+    fname = doc.file_name.lower()
     path = f"/tmp/{fname}"
     await file.download_to_drive(path)
 
-    try:
-        df = pd.read_csv(path) if fname.endswith(".csv") else pd.read_excel(path)
-    except:
+    df = read_file(path, fname)
+    if df is None:
         await update.message.reply_text("❌ File read panna mudiyala.")
         return
 
-    # find stock column ONLY
-    stock_col = None
-    for col in df.columns:
-        if str(col).lower() in ["stock name", "company", "instrument", "security"]:
-            stock_col = col
-            break
-
+    stock_col = detect_stock_column(df)
     if not stock_col:
         await update.message.reply_text("❌ Stock Name column kandupidikka mudiyala.")
         return
 
     stocks = []
-    for val in df[stock_col].dropna():
-        name = str(val).upper().strip()
-        if is_real_stock(name):
-            stocks.append(clean_symbol(name))
+    for v in df[stock_col].dropna():
+        s = clean_stock(str(v))
+        if s:
+            stocks.append(s)
+
+    stocks = list(set(stocks))
 
     if not stocks:
-        await update.message.reply_text("❌ Valid NSE stocks illa.")
+        await update.message.reply_text("❌ Valid stocks illa.")
         return
 
-    user_stocks[chat_id] = list(set(stocks))
+    user_stocks[chat_id] = stocks
 
     await update.message.reply_text(
-        f"✅ {len(user_stocks[chat_id])} REAL stocks detected\n"
+        f"✅ {len(stocks)} REAL stocks detected\n"
         "🔥 Every 30 mins update start aagiduchu"
     )
 
-    await send_analysis(chat_id, context)
+    await analyse_and_send(chat_id, context)
 
-
-# ---------------- ANALYSIS ----------------
-async def send_analysis(chat_id, context):
-    stocks = user_stocks.get(chat_id)
-    if not stocks:
-        return
-
-    msg = "📊 *Portfolio Update*\n\n"
-    for s in stocks:
-        msg += f"{s} : {analyse_stock(s)}\n"
-
-    await context.bot.send_message(chat_id, msg, parse_mode="Markdown")
-
-
-# ---------------- SCHEDULER ----------------
-async def scheduler(context):
-    for cid in user_stocks:
-        await send_analysis(cid, context)
-
+# ---------------- JOB ----------------
+async def scheduled(context):
+    for chat_id in user_stocks:
+        await analyse_and_send(chat_id, context)
 
 # ---------------- MAIN ----------------
 def main():
-    app = Application.builder().token(TOKEN).build()
+    app = ApplicationBuilder().token(TOKEN).build()
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(MessageHandler(filters.Document.ALL, handle_file))
 
-    if app.job_queue:
-        app.job_queue.run_repeating(
-            scheduler,
-            interval=UPDATE_INTERVAL,
-            first=UPDATE_INTERVAL
-        )
+    jobq: JobQueue = app.job_queue
+    jobq.run_repeating(scheduled, interval=1800, first=1800)
 
-    print("🤖 Stock AI Bot Running")
     app.run_polling()
-
 
 if __name__ == "__main__":
     main()
