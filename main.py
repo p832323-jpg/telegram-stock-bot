@@ -6,16 +6,25 @@ import yfinance as yf
 
 TOKEN = os.getenv("BOT_TOKEN")
 
+POSSIBLE_COLUMNS = [
+    "Stock Name",
+    "Instrument",
+    "Company",
+    "Security Name",
+    "Stock",
+    "Symbol"
+]
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "👋 Hi!\n\n"
-        "📂 Groww Holdings Excel (.xlsx) file upload pannunga.\n"
-        "❌ Manual edit thevai illa.\n"
-        "🤖 Naan auto analyse panni SELL / HOLD solluven."
+        "📂 Groww Holdings Excel (.xlsx) file upload pannunga\n"
+        "❌ Manual edit thevai illa\n"
+        "🤖 Naan auto analyse panni SELL / HOLD solluven"
     )
 
 def clean_symbol(name: str):
-    name = name.upper()
+    name = str(name).upper()
     remove_words = [" LTD.", " LIMITED", " LTD", " LIMITED."]
     for w in remove_words:
         name = name.replace(w, "")
@@ -30,17 +39,27 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         df = pd.read_excel(file_path)
     except Exception:
-        await update.message.reply_text("❌ File read panna mudiyala. Correct Groww Excel upload pannunga.")
+        await update.message.reply_text("❌ Excel file read panna mudiyala.")
         return
 
-    if "Stock Name" not in df.columns:
-        await update.message.reply_text("❌ 'Stock Name' column kandupidikka mudiyala.")
+    stock_column = None
+    for col in POSSIBLE_COLUMNS:
+        if col in df.columns:
+            stock_column = col
+            break
+
+    if stock_column is None:
+        await update.message.reply_text(
+            "❌ Stock column kandupidikka mudiyala.\n"
+            f"Found columns:\n{list(df.columns)}"
+        )
         return
 
-    stocks = df["Stock Name"].dropna().tolist()
+    stocks = df[stock_column].dropna().tolist()
     symbols = [clean_symbol(s) for s in stocks]
 
-    reply = "📊 *Analysis Result*\n\n"
+    reply = "📊 *Groww Holdings – Analysis*\n\n"
+
     for sym in symbols:
         try:
             data = yf.Ticker(sym).history(period="5d")
